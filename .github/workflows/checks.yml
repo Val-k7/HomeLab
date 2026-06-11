@@ -1,0 +1,169 @@
+name: checks
+
+on:
+  pull_request: {}
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  go:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: "1.26"
+      - name: go vet
+        working-directory: control-api
+        run: go vet ./...
+      - name: go test
+        working-directory: control-api
+        run: go test ./...
+      - name: staticcheck
+        working-directory: control-api
+        run: go run honnef.co/go/tools/cmd/staticcheck@v0.7.0 ./...
+      - name: govulncheck (advisory)
+        # Informational: stdlib advisories land before the Go patch that fixes
+        # them ships, so this must not gate the build. Review its output.
+        continue-on-error: true
+        working-directory: control-api
+        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+      - name: gofmt
+        working-directory: control-api
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "These files are not gofmt-clean:"; echo "$unformatted"; exit 1
+          fi
+      - name: build validate-platform
+        working-directory: control-api
+        run: go build ./cmd/validate-platform
+
+  secrets-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          fetch-depth: 0
+      # Run the gitleaks CLI directly (not the action), which scans the full git
+      # history without any GitHub API calls — so it needs no extra token
+      # permissions. Config + allowlist live in .gitleaks.toml.
+      - name: gitleaks
+        run: |
+          V=8.24.3
+          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${V}/gitleaks_${V}_linux_x64.tar.gz" \
+            | tar -xz gitleaks
+          ./gitleaks detect --source . --config .gitleaks.toml --redact --no-banner --exit-code 1
+
+  # Lint the workflow files themselves. deploy.yml/rollback.yml only run on
+  # push-to-main, so they were never parsed by PR checks — a malformed one
+  # reached main once (invalid YAML in a run block -> 0 jobs). actionlint
+  # validates YAML structure + GitHub-expression syntax on every PR. Shell and
+  # python linting of run: blocks are disabled (bin/*.sh has its own shellcheck
+  # job; run-block linting is noisy), keeping this focused on workflow validity.
+  actionlint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - name: actionlint
+        run: |
+          bash <(curl -sSfL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
+          ./actionlint -color -shellcheck= -pyflakes=
+
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "20"
+      - name: install
+        working-directory: web
+        run: npm ci
+      - name: build
+        working-directory: web
+        run: npm run build
+
+  shellcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - name: shellcheck
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y shellcheck
+          shellcheck --severity=warning bin/*.sh
+
+  # Enumerate every hosts/<name>/ so the platform job validates the whole fleet,
+  # not just homelab. Output is a JSON array consumed by the matrix below.
+  discover:
+    runs-on: ubuntu-latest
+    outputs:
+      hosts: ${{ steps.h.outputs.hosts }}
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - id: h
+        run: |
+          hosts=$(for d in hosts/*/; do
+            [ -f "${d}configuration.nix" ] && basename "$d"
+          done | paste -sd, -)
+          json=$(printf '%s' "$hosts" | tr ',' '\n' | grep -v '^$' \
+            | sed 's/.*/"&"/' | paste -sd, -)
+          echo "hosts=[${json}]" >> "$GITHUB_OUTPUT"
+          echo "discovered hosts: [${json}]"
+
+  # Restore end-to-end gate (v0.6 T2): build + run the NixOS VM test that
+  # proves the backup -> restore cycle round-trips (tests/restore-e2e.nix).
+  # Kept out of the platform job's `nix flake check --no-build` because it
+  # needs an actual VM build + KVM; release.yml also gates tag releases on it.
+  restore-e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: cachix/install-nix-action@ba0dd844c9180cbf77aa72a116d6fbc515d0e87b # v27
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+            system-features = nixos-test benchmark big-parallel kvm
+      - name: Run restore e2e VM test
+        run: nix build --impure -L .#checks.x86_64-linux.restore-e2e
+
+  platform:
+    needs: discover
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        host: ${{ fromJSON(needs.discover.outputs.hosts) }}
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: cachix/install-nix-action@ba0dd844c9180cbf77aa72a116d6fbc515d0e87b # v27
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: "1.26"
+      - name: Prepare env for ${{ matrix.host }}
+        run: |
+          # Per-host example if present, else the repo-root example.
+          if [ -f "hosts/${{ matrix.host }}/.env.example" ]; then
+            cp "hosts/${{ matrix.host }}/.env.example" "$RUNNER_TEMP/host.env"
+          else
+            cp .env.example "$RUNNER_TEMP/host.env"
+          fi
+          echo "HOMELAB_ENV=$RUNNER_TEMP/host.env" >> "$GITHUB_ENV"
+      - name: Flake check (tests + module assertions)
+        run: nix flake check --impure --no-build
+      - name: Generate manifests for ${{ matrix.host }}
+        run: |
+          base='.#nixosConfigurations.${{ matrix.host }}.config.environment.etc'
+          nix eval --impure --raw "${base}.\"homelab/apps.json\".text" > apps.json
+          nix eval --impure --raw "${base}.\"homelab/policies.json\".text" > policies.json
+          nix eval --impure --raw "${base}.\"homelab/platform.json\".text" > platform.json
+      - name: Validate platform (strict)
+        working-directory: control-api
+        run: go run ./cmd/validate-platform --apps ../apps.json --policies ../policies.json --platform ../platform.json --lock ../workshop-lock.json --strict

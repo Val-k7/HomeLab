@@ -1,0 +1,23 @@
+# gitleaks config for the secrets-scan CI gate (see .github/workflows/checks.yml).
+# Extends the upstream default ruleset and allowlists files that are committed
+# on purpose and contain no real secrets: the example env, the example/placeholder
+# SOPS files (values are ENC[...] ciphertext or placeholders), and Go test
+# fixtures that use obvious dummy tokens.
+title = "HomeLab gitleaks"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Committed examples and test fixtures — no real secrets"
+paths = [
+  '''(^|/)\.env\.example$''',
+  '''(^|/)secrets/.*example.*\.ya?ml$''',
+  '''(^|/)\.sops\.yaml$''',
+  '''.*_test\.go$''',
+]
+# Dummy values that appear in tests/docs and must not trip the scan.
+regexes = [
+  '''test-svc-token''',
+  '''x-access-token''',
+]

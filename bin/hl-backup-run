@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# Started AS ROOT by the hl-backup@.service systemd template. $1 is the job id
+# (the unit instance). The template ExecStart is fixed in Nix, so control-api can
+# only trigger a backup with a job id it owns, never an arbitrary root command.
+set -euo pipefail
+
+JOB="${1:-}"
+[[ "$JOB" =~ ^[0-9]{8}-[0-9]{6}-[a-z0-9]+$ ]] || { echo "hl-backup-run: bad job id" >&2; exit 2; }
+
+SPEC="/var/lib/homelab/jobs/$JOB.json"
+[ -r "$SPEC" ] || { echo "hl-backup-run: missing spec $SPEC" >&2; exit 2; }
+# Spec is one argument per line: verb, app, then optional snapshot id (any of
+# the trailing lines may be empty/missing).
+{ read -r VERB; read -r APP || true; read -r SNAP || true; } < "$SPEC"
+rm -f "$SPEC"
+VERB="${VERB:-}"
+APP="${APP:-}"
+SNAP="${SNAP:-}"
+
+case "$VERB" in
+  backup|restore-test|verify|snapshots|restore) ;;
+  *) echo "hl-backup-run: invalid verb" >&2; exit 2 ;;
+esac
+if [ -n "$APP" ] && ! [[ "$APP" =~ ^[a-z0-9][a-z0-9-]{0,40}$ ]]; then
+  echo "hl-backup-run: invalid app" >&2; exit 2
+fi
+if [ -n "$SNAP" ] && ! [[ "$SNAP" =~ ^(latest|[a-f0-9]{8,64})$ ]]; then
+  echo "hl-backup-run: invalid snapshot id" >&2; exit 2
+fi
+# 'restore' is destructive; never let an empty app fan out to every app.
+if [ "$VERB" = restore ] && [ -z "$APP" ]; then
+  echo "hl-backup-run: restore requires an explicit app" >&2; exit 2
+fi
+
+# shellcheck disable=SC1091
+[ -r /etc/homelab/control.env ] && . /etc/homelab/control.env
+DIR="${HOMELAB_DIR:-/home/admin/homelab}"
+
+exec /run/current-system/sw/bin/bash "$DIR/bin/backup.sh" "$VERB" "$APP" "$SNAP"

@@ -1,0 +1,43 @@
+# Secrets: SOPS-encrypted files in secrets/ are committed; plaintext keys never are.
+*.key
+*.pem
+.env
+secrets/age
+secrets/*.txt
+
+# Local Nix build results
+result
+result-*
+
+# Local Nix cache
+.direnv/
+
+# Stray runtime artifacts
+var/
+.ruff_cache/
+.claude/
+
+# Go build artifacts
+control-api/control-api
+control-api/control-api.exe
+*.exe
+
+# CI-generated manifests (validate-platform)
+/apps.json
+/policies.json
+/platform.json
+
+# Web build artifacts
+web/node_modules/
+web/dist/
+
+# Local GitHub Wiki staging (pushed by release.sh, not part of the code repo)
+wiki-staging/
+
+# MCP debug module deps (the module itself is committed; its deps are not)
+mcp/node_modules/
+mcp/dist/
+.app-create.lock
+
+# local analysis artifacts
+.understand-anything/

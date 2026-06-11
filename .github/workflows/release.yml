@@ -1,0 +1,57 @@
+name: release
+
+# CI2 (v0.6): when a version tag is pushed, publish a GitHub Release for it
+# using the matching changelog as the notes. The private repo's source-of-truth
+# releases are cut here; the public mirror is published separately by release.sh.
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+"
+      - "v[0-9]+.[0-9]+.[0-9]+"
+
+permissions:
+  contents: write
+
+jobs:
+  # Restore end-to-end gate (v0.6 T2): a tag release only publishes if the
+  # backup -> restore NixOS VM test passes (tests/restore-e2e.nix). Same job
+  # shape as the restore-e2e job in checks.yml.
+  restore-e2e:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: cachix/install-nix-action@ba0dd844c9180cbf77aa72a116d6fbc515d0e87b # v27
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+            system-features = nixos-test benchmark big-parallel kvm
+      - name: Run restore e2e VM test
+        run: nix build --impure -L .#checks.x86_64-linux.restore-e2e
+
+  release:
+    needs: restore-e2e
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - name: Create release from changelog
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          notes="docs/changelog/${TAG}.md"
+          # Check existence explicitly: the old `create || echo` fallback also
+          # swallowed real failures (auth, network), leaving the job green with
+          # no release.
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            if [ -f "$notes" ]; then
+              gh release edit "$TAG" --notes-file "$notes"
+            else
+              echo "release for $TAG already exists"
+            fi
+          elif [ -f "$notes" ]; then
+            gh release create "$TAG" --title "$TAG" --notes-file "$notes" --verify-tag
+          else
+            gh release create "$TAG" --title "$TAG" --generate-notes --verify-tag
+          fi

@@ -1,0 +1,59 @@
+name: rollback
+
+on:
+  workflow_dispatch:
+    inputs:
+      host:
+        description: "Host to roll back (matches the deploy concurrency group)"
+        required: false
+        default: "homelab"
+      ssh_host:
+        description: "Override SSH host (blank = SSH_HOST secret)"
+        required: false
+        default: ""
+      generation:
+        description: "Generation number (empty = previous)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-${{ github.event.inputs.host || 'homelab' }}
+  cancel-in-progress: false
+
+jobs:
+  rollback:
+    runs-on: ubuntu-latest
+    env:
+      HOST: "${{ secrets.SSH_USER }}@${{ github.event.inputs.ssh_host || secrets.SSH_HOST }}"
+    steps:
+      - name: Configure SSH host-key checking
+        run: |
+          if [ -n "${{ secrets.SSH_KNOWN_HOSTS }}" ]; then
+            printf '%s\n' "${{ secrets.SSH_KNOWN_HOSTS }}" > "$RUNNER_TEMP/known_hosts"
+            echo "SSH_OPTS=-o StrictHostKeyChecking=yes -o UserKnownHostsFile=$RUNNER_TEMP/known_hosts -o ConnectTimeout=8" >> "$GITHUB_ENV"
+          else
+            echo "::warning::SSH_KNOWN_HOSTS secret not set — falling back to accept-new (TOFU, not verified)"
+            echo "SSH_OPTS=-o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8" >> "$GITHUB_ENV"
+          fi
+
+      - name: Connect to tailnet
+        uses: tailscale/github-action@6cae46e2d796f265265cfcf628b72a32b4d7cade # v3
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci
+
+      - name: Rollback
+        run: |
+          GEN="${{ github.event.inputs.generation }}"
+          if [ -n "$GEN" ] && ! printf '%s' "$GEN" | grep -qE '^[0-9]+$'; then
+            echo "::error::generation must be a positive integer"; exit 1
+          fi
+          if [ -z "$GEN" ]; then
+            ssh $SSH_OPTS "$HOST" "sudo nixos-rebuild switch --rollback"
+          else
+            ssh $SSH_OPTS "$HOST" "sudo nix-env --profile /nix/var/nix/profiles/system --switch-generation '$GEN' && sudo /nix/var/nix/profiles/system/bin/switch-to-configuration switch"
+          fi

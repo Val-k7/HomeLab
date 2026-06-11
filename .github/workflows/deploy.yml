@@ -1,0 +1,283 @@
+name: deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      host:
+        description: "Deploy only this host (blank = whole fleet)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  # Build the deploy matrix. By default the fleet is a single host, homelab,
+  # driven entirely by the existing flat secrets (identical to v0.1 behaviour).
+  # Set the repository variable FLEET to a JSON array to deploy more hosts, e.g.
+  #   [{"host":"homelab"},{"host":"edge","ssh_host":"edge","ssh_user":"admin"}]
+  # Each entry may override ssh_host / ssh_user / remote_dir; omitted fields fall
+  # back to the SSH_HOST / SSH_USER secrets. A workflow_dispatch `host` input
+  # narrows the run to a single host.
+  fleet:
+    needs: changes
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.m.outputs.matrix }}
+      count: ${{ steps.m.outputs.count }}
+    steps:
+      - id: m
+        env:
+          FLEET: ${{ vars.FLEET }}
+          ONLY: ${{ github.event.inputs.host }}
+          SHARED: ${{ needs.changes.outputs.shared }}
+          CHANGED_HOSTS: ${{ needs.changes.outputs.changed_hosts }}
+        run: |
+          fleet="$FLEET"
+          [ -n "$fleet" ] || fleet='[{"host":"homelab"}]'
+          # Parse through python to: validate the JSON (a malformed FLEET fails
+          # here with a clear error, not an opaque matrix error); apply the
+          # optional dispatch single-host filter (ONLY); and, when the change is
+          # NOT shared infra, keep only the hosts that actually changed
+          # (CHANGED_HOSTS). A shared change keeps the whole fleet.
+          fleet=$(printf '%s' "$fleet" | python3 -c 'import os,sys,json; a=json.load(sys.stdin); ok=isinstance(a,list) and all(isinstance(h,dict) and h.get("host") for h in a); sys.exit("FLEET must be a JSON array of {host:...} objects") if not ok else None; only=os.environ.get("ONLY",""); a=[h for h in a if h.get("host")==only] if only else a; ch=set(os.environ.get("CHANGED_HOSTS","").split()); a=a if os.environ.get("SHARED","")=="true" else [h for h in a if h.get("host") in ch]; print(json.dumps(a))') || { echo "::error::invalid FLEET variable"; exit 1; }
+          echo "matrix={\"include\":$fleet}" >> "$GITHUB_OUTPUT"
+          # An empty include list hard-fails the deploy job; expose the count so
+          # the job can skip cleanly instead.
+          echo "count=$(printf '%s' "$fleet" | python3 -c 'import sys,json; print(len(json.load(sys.stdin)))')" >> "$GITHUB_OUTPUT"
+          echo "fleet matrix: $fleet"
+
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      deploy: ${{ steps.f.outputs.deploy }}
+      infra: ${{ steps.f.outputs.infra }}
+      # shared=true when a change touches host-independent infra (modules, flake,
+      # control-api, web, config, lib, bin, CI) -> every fleet host must redeploy.
+      # changed_hosts lists hosts/<name>/ dirs that changed -> only those redeploy
+      # when shared=false. The fleet job intersects these with the FLEET.
+      shared: ${{ steps.f.outputs.shared }}
+      changed_hosts: ${{ steps.f.outputs.changed_hosts }}
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          fetch-depth: 0
+      - id: f
+        run: |
+          BEFORE="${{ github.event.before }}"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] || [ -z "$BEFORE" ] || ! git cat-file -e "${BEFORE}^{commit}" 2>/dev/null; then
+            # Unknown diff (manual run / first push): treat as shared so the whole
+            # fleet (or the dispatch-selected host) deploys.
+            { echo "deploy=true"; echo "infra=true"; echo "shared=true"; echo "changed_hosts="; } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          FILES=$(git diff --name-only "$BEFORE" "${{ github.sha }}")
+          echo "changed:"; echo "$FILES"
+          DEPLOY=false; INFRA=false; SHARED=false; HOSTS=""
+          while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            case "$f" in
+              *.md) ;;
+              hosts/*/*)
+                DEPLOY=true; INFRA=true
+                h=$(printf '%s' "$f" | cut -d/ -f2)
+                case " $HOSTS " in *" $h "*) ;; *) HOSTS="$HOSTS $h" ;; esac
+                ;;
+              web/*) DEPLOY=true; SHARED=true ;;
+              flake.nix|flake.lock|modules/*|lib/*|control-api/*|config/*|bin/*|.github/*|.env.example) DEPLOY=true; INFRA=true; SHARED=true ;;
+              *) DEPLOY=true; INFRA=true; SHARED=true ;;
+            esac
+          done <<< "$FILES"
+          {
+            echo "deploy=$DEPLOY"
+            echo "infra=$INFRA"
+            echo "shared=$SHARED"
+            echo "changed_hosts=$(printf '%s' "$HOSTS" | xargs echo -n)"
+          } >> "$GITHUB_OUTPUT"
+          echo "=> deploy=$DEPLOY infra=$INFRA shared=$SHARED hosts=[$HOSTS]"
+
+  check:
+    needs: changes
+    if: needs.changes.outputs.infra == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: cachix/install-nix-action@ba0dd844c9180cbf77aa72a116d6fbc515d0e87b # v27
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+      - name: Eval gate
+        run: |
+          cp .env.example .env
+          bash bin/check-env.sh .env.example .env
+          nix flake check --impure --no-build
+
+  deploy:
+    needs: [fleet, changes, check]
+    if: ${{ !cancelled() && needs.changes.outputs.deploy == 'true' && needs.fleet.outputs.count != '0' && (needs.check.result == 'success' || needs.check.result == 'skipped') }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.fleet.outputs.matrix) }}
+    # One in-flight deploy per host; different hosts deploy in parallel.
+    concurrency:
+      group: deploy-${{ matrix.host }}
+      cancel-in-progress: false
+    env:
+      HL_HOST: "${{ matrix.host }}"
+      SSH_USER: "${{ matrix.ssh_user || secrets.SSH_USER }}"
+      SSH_HOST: "${{ matrix.ssh_host || secrets.SSH_HOST }}"
+      DEPLOY_SHA: "${{ github.sha }}"
+    steps:
+      - name: Resolve host target
+        run: |
+          echo "HOST=${SSH_USER}@${SSH_HOST}" >> "$GITHUB_ENV"
+          RD="${{ matrix.remote_dir }}"
+          [ -n "$RD" ] || RD="/home/${SSH_USER}/homelab"
+          echo "REMOTE_DIR=$RD" >> "$GITHUB_ENV"
+          # The .env path the host build reads: per-host dir for non-default
+          # hosts, repo root for homelab (v0.1 layout, unchanged).
+          if [ "$HL_HOST" = "homelab" ]; then
+            echo "ENV_PATH=$RD/.env" >> "$GITHUB_ENV"
+          else
+            echo "ENV_PATH=$RD/hosts/$HL_HOST/.env" >> "$GITHUB_ENV"
+          fi
+
+      - name: Configure SSH host-key checking
+        run: |
+          if [ -n "${{ secrets.SSH_KNOWN_HOSTS }}" ]; then
+            printf '%s\n' "${{ secrets.SSH_KNOWN_HOSTS }}" > "$RUNNER_TEMP/known_hosts"
+            echo "SSH_OPTS=-o StrictHostKeyChecking=yes -o UserKnownHostsFile=$RUNNER_TEMP/known_hosts -o ConnectTimeout=8" >> "$GITHUB_ENV"
+          elif [ "${{ vars.ALLOW_TOFU }}" = "true" ]; then
+            echo "::warning::SSH_KNOWN_HOSTS secret not set and ALLOW_TOFU=true — falling back to accept-new (TOFU, host key NOT verified). Set the SSH_KNOWN_HOSTS secret to remove this risk."
+            echo "SSH_OPTS=-o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8" >> "$GITHUB_ENV"
+          else
+            echo "::error::SSH_KNOWN_HOSTS secret not set — refusing to deploy without host-key verification. Capture the host key with: ssh-keyscan -p <ssh-port> <ssh-host>  and store the output in the SSH_KNOWN_HOSTS secret. To temporarily allow trust-on-first-use instead, set the repository variable ALLOW_TOFU=true."
+            exit 1
+          fi
+
+      - name: Connect to tailnet
+        uses: tailscale/github-action@6cae46e2d796f265265cfcf628b72a32b4d7cade # v3
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci
+
+      - name: Write .env on host
+        run: |
+          # Keep the explicit HOSTNAME secret if set; otherwise the host's
+          # name defaults to its flake host (the hosts/<name>/ directory).
+          HN="${{ secrets.HOSTNAME }}"; [ -n "$HN" ] || HN="$HL_HOST"
+          {
+            echo "HOSTNAME=$HN"
+            echo "TIMEZONE=${{ secrets.TIMEZONE }}"
+            echo "LOCALE=${{ secrets.LOCALE }}"
+            echo "USERNAME=${{ secrets.USERNAME }}"
+            echo "USER_DESCRIPTION=${{ secrets.USER_DESCRIPTION }}"
+            echo "SUDO_NEEDS_PASSWORD=${{ secrets.SUDO_NEEDS_PASSWORD }}"
+            echo "INTERFACE=${{ secrets.INTERFACE }}"
+            echo "USE_DHCP=${{ secrets.USE_DHCP }}"
+            echo "STATIC_IP=${{ secrets.STATIC_IP }}"
+            echo "PREFIX_LENGTH=${{ secrets.PREFIX_LENGTH }}"
+            echo "GATEWAY=${{ secrets.GATEWAY }}"
+            echo "NAMESERVERS=${{ secrets.NAMESERVERS }}"
+            echo "ENABLE_IPV6=${{ secrets.ENABLE_IPV6 }}"
+            echo "SSH_PORT=${{ secrets.SSH_PORT }}"
+            echo "SSH_OPEN_FIREWALL=${{ secrets.SSH_OPEN_FIREWALL }}"
+            echo "SSH_PASSWORD_AUTH=${{ secrets.SSH_PASSWORD_AUTH }}"
+            echo "SSH_AUTHORIZED_KEYS_FILE=${{ secrets.SSH_AUTHORIZED_KEYS_FILE }}"
+            echo "SSH_AUTHORIZED_KEYS=${{ secrets.SSH_AUTHORIZED_KEYS }}"
+            echo "TAILSCALE_AUTHKEY_FILE=${{ secrets.TAILSCALE_AUTHKEY_FILE }}"
+            echo "CONTROL_API_PORT=${{ secrets.CONTROL_API_PORT }}"
+            echo "REPO_URL=${{ secrets.REPO_URL }}"
+            echo "OAUTH2_GITHUB_ORG=${{ secrets.OAUTH2_GITHUB_ORG }}"
+            echo "OAUTH2_GITHUB_USERS=${{ secrets.OAUTH2_GITHUB_USERS }}"
+          } | ssh $SSH_OPTS "$HOST" "umask 077; mkdir -p \"\$(dirname '$ENV_PATH')\"; cat > '$ENV_PATH'; chmod 600 '$ENV_PATH'"
+
+      - name: Provision git token on host
+        # The control plane's git_token is no longer carried through sops/age:
+        # the deploy writes it straight to a host file (0440 root:controlapi) the
+        # same way it writes .env. Rotation = update the GIT_TOKEN repo secret and
+        # redeploy. On the very first deploy the controlapi group may not exist yet
+        # (it is created by this run's rebuild); the chgrp then no-ops and the next
+        # deploy fixes the group, so activation is never blocked.
+        run: |
+          printf '%s' "${{ secrets.GIT_TOKEN }}" | ssh $SSH_OPTS "$HOST" "set -eu
+            umask 077
+            sudo install -d -m 0750 /var/lib/homelab-secrets
+            sudo install -m 0440 /dev/stdin /var/lib/homelab-secrets/git_token
+            sudo chgrp controlapi /var/lib/homelab-secrets /var/lib/homelab-secrets/git_token 2>/dev/null || true"
+
+      - name: Sync repo to workflow SHA
+        run: |
+          ssh $SSH_OPTS "$HOST" "set -eu
+            cd '$REMOTE_DIR'
+            git config --global --add safe.directory '$REMOTE_DIR' 2>/dev/null || true
+            REPO_URL='${{ secrets.REPO_URL }}'
+            [ -n \"\$REPO_URL\" ] || REPO_URL=\$(git remote get-url origin)
+            TOKEN_FILE=\"\${HOMELAB_GIT_TOKEN_FILE:-/var/lib/homelab-secrets/git_token}\"
+            TOKEN=\$(sudo cat \"\$TOKEN_FILE\" 2>/dev/null || cat \"\$TOKEN_FILE\" 2>/dev/null || true)
+            git remote set-url origin \"\$REPO_URL\"
+            if printf '%s' \"\$REPO_URL\" | grep -Eq '^https://([^@]+@)?github.com/' && [ -n \"\$TOKEN\" ]; then
+              CRED=\$(mktemp); chmod 600 \"\$CRED\"
+              printf 'https://x-access-token:%s@github.com\n' \"\$TOKEN\" > \"\$CRED\"
+              trap 'rm -f \"\$CRED\"' EXIT
+              git -c credential.helper=\"store --file=\$CRED\" fetch \"\$REPO_URL\" main
+            else
+              git fetch \"\$REPO_URL\" main
+            fi
+            git reset --hard '$DEPLOY_SHA'
+            test \"\$(git rev-parse HEAD)\" = '$DEPLOY_SHA'
+          "
+
+      - name: Dispatch detached deploy
+        run: |
+          ssh $SSH_OPTS "$HOST" "sudo systemctl stop ci-deploy 2>/dev/null; sudo systemctl reset-failed ci-deploy 2>/dev/null; true"
+          ssh $SSH_OPTS "$HOST" "sudo systemd-run --no-block --unit=ci-deploy --setenv=HOMELAB_DEPLOY_REF=$DEPLOY_SHA --setenv=HOMELAB_HOST=$HL_HOST /run/current-system/sw/bin/bash $REMOTE_DIR/bin/deploy.sh $REMOTE_DIR switch"
+
+      - name: Wait for deploy (survives tailscaled restart)
+        run: |
+          for i in $(seq 1 150); do
+            sleep 8
+            OUT=$(ssh $SSH_OPTS "$HOST" "systemctl show ci-deploy -p ActiveState,Result,ExecMainStatus --value 2>/dev/null" 2>/dev/null || true)
+            AS=$(printf '%s\n' "$OUT" | sed -n 1p)
+            RS=$(printf '%s\n' "$OUT" | sed -n 2p)
+            ES=$(printf '%s\n' "$OUT" | sed -n 3p)
+            echo "poll $i: state=${AS:-?} result=${RS:-?} status=${ES:-?}"
+            if [ "$AS" = "inactive" ] || [ "$AS" = "failed" ]; then
+              if [ "$RS" = "success" ] && [ "${ES:-0}" = "0" ]; then
+                echo "deploy unit OK"
+                ssh $SSH_OPTS "$HOST" "journalctl -u ci-deploy -n 120 --no-pager" 2>/dev/null || true
+                exit 0
+              fi
+              echo "::error::deploy failed (auto-rollback fires on host)"
+              ssh $SSH_OPTS "$HOST" "journalctl -u ci-deploy -n 60 --no-pager" 2>/dev/null || true
+              exit 1
+            fi
+          done
+          echo "::error::deploy timed out"; exit 1
+
+      - name: Verify deployed commit and control plane
+        run: |
+          PORT="${{ secrets.CONTROL_API_PORT }}"
+          [ -n "$PORT" ] || PORT=9092
+          REMOTE_HEAD=$(ssh $SSH_OPTS "$HOST" "git -C '$REMOTE_DIR' rev-parse HEAD")
+          DEPLOYED=$(ssh $SSH_OPTS "$HOST" "cat /var/lib/homelab/deployed-commit 2>/dev/null || true")
+          echo "remote head: $REMOTE_HEAD"
+          echo "deployed commit: $DEPLOYED"
+          test "$REMOTE_HEAD" = "$DEPLOY_SHA"
+          test "$DEPLOYED" = "$DEPLOY_SHA"
+          ssh $SSH_OPTS "$HOST" "curl -fsS http://127.0.0.1:$PORT/healthz >/dev/null"
+          # NB: only unauthenticated endpoints are probed here. /healthz (liveness)
+          # and /v1/status (host/generation/version) need no identity; role-gated
+          # endpoints like /v1/deployments require an oauth2-proxy identity, which
+          # CI cannot present now that the machine service-token path is gone.
+          # Multi-host live check: the deployed control-api must report THIS host
+          # on /v1/status (proves host-awareness landed and the right host ran).
+          STATUS=$(ssh $SSH_OPTS "$HOST" "curl -fsS http://127.0.0.1:$PORT/v1/status")
+          echo "status: $STATUS"
+          REPORTED=$(printf '%s' "$STATUS" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("host",""))')
+          echo "control-api reports host=$REPORTED (expected $HL_HOST)"
+          test "$REPORTED" = "$HL_HOST"

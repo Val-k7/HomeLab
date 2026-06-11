@@ -1,0 +1,10 @@
+{
+  "default_role": "viewer",
+  "users": { "admin@example.com" : "admin" },
+  "roles": {
+    "viewer": 0,
+    "operator": 1,
+    "maintainer": 2,
+    "admin": 3
+  }
+}

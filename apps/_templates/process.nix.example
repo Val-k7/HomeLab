@@ -1,0 +1,12 @@
+{
+  runner = "process";
+  repo = "https://github.com/you/your-node-app";
+  rev = "0000000000000000000000000000000000000000";
+  runtime = "nodejs_22";
+  buildCmd = "npm ci && npm run build";
+  startCmd = "node dist/index.js";
+  port = 3000;
+  env = { NODE_ENV = "production"; };
+  metrics = true;
+  metricsPath = "/metrics";
+}

@@ -1,0 +1,9 @@
+# Replace the placeholder recipient with your host's age public key:
+#   age-keygen -o secrets/age && age-keygen -y secrets/age
+keys:
+  - &host age1examplexxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+creation_rules:
+  - path_regex: secrets/.*\.yaml$
+    key_groups:
+      - age:
+          - *host

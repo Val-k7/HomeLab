@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# Started AS ROOT by the hl-deploy@.service systemd template. $1 is the job id
+# (the unit instance). The ExecStart of that template is fixed in Nix, so
+# control-api can only ever trigger a deploy with a job id it owns — it can never
+# choose the command that runs as root. This script reads the validated job spec
+# control-api wrote, re-validates it, and execs the deploy script.
+set -euo pipefail
+
+JOB="${1:-}"
+[[ "$JOB" =~ ^[0-9]{8}-[0-9]{6}-[a-z0-9]+$ ]] || { echo "hl-deploy-run: bad job id" >&2; exit 2; }
+
+SPEC="/var/lib/homelab/jobs/$JOB.json"
+[ -r "$SPEC" ] || { echo "hl-deploy-run: missing spec $SPEC" >&2; exit 2; }
+# Spec is two lines: mode, then target (target may be an empty line).
+{ read -r MODE; read -r TARGET || true; } < "$SPEC"
+rm -f "$SPEC"
+MODE="${MODE:-}"
+TARGET="${TARGET:-}"
+
+case "$MODE" in
+  dry-run|build|switch|rollback) ;;
+  *) echo "hl-deploy-run: invalid mode" >&2; exit 2 ;;
+esac
+case "$MODE" in
+  rollback)
+    # rollback target is a generation number; deploy.sh interpolates it into a
+    # /nix profile path it execs as root, so it must be digits only.
+    [[ "$TARGET" =~ ^[0-9]{0,18}$ ]] || { echo "hl-deploy-run: rollback target must be a generation number" >&2; exit 2; }
+    ;;
+  *)
+    { [[ "$TARGET" =~ ^[A-Za-z0-9:._/@-]{0,160}$ ]] && [[ "$TARGET" != *..* ]]; } \
+      || { echo "hl-deploy-run: invalid target" >&2; exit 2; }
+    ;;
+esac
+
+# shellcheck disable=SC1091
+[ -r /etc/homelab/control.env ] && . /etc/homelab/control.env
+DIR="${HOMELAB_DIR:-/home/admin/homelab}"
+# Which flake host this control-api drives; deploy.sh maps it to the #<name>
+# flake attribute. Exported so the child deploy.sh inherits it.
+export HOMELAB_HOST="${HOMELAB_HOST:-homelab}"
+
+exec /run/current-system/sw/bin/bash "$DIR/bin/deploy.sh" "$DIR" "$MODE" "$TARGET"

@@ -1,0 +1,5 @@
+# ghp_ token leaked as a plaintext YAML key by a swapped `sops set` invocation
+# (commit 7fa9c84, secrets/homelab.yaml line 4). Key removed in the follow-up
+# commit; the token itself must be revoked on GitHub — ignoring the historical
+# fingerprint only, current tree stays scanned.
+7fa9c8425f2126837977b8e928c7fb08bfb7f372:secrets/homelab.yaml:github-pat:4

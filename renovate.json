@@ -1,0 +1,61 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended"
+  ],
+  "nix": {
+    "enabled": true
+  },
+  "gomod": {
+    "description": "control-api/go.mod — no external deps today, but any future ones must be tracked.",
+    "enabled": true
+  },
+  "npm": {
+    "description": "web/ frontend dependencies (covered by config:recommended defaults; explicit for clarity).",
+    "enabled": true
+  },
+  "lockFileMaintenance": {
+    "enabled": true
+  },
+  "docker-compose": {
+    "enabled": true,
+    "pinDigests": true
+  },
+  "docker": {
+    "pinDigests": true
+  },
+  "packageRules": [
+    {
+      "matchManagers": ["nix"],
+      "matchPackageNames": ["nixpkgs"],
+      "automerge": false
+    },
+    {
+      "description": "App image and ref bumps are reviewed by default; the platform policy/CI decides what may automerge (updatePolicy=autoLow only).",
+      "matchFileNames": ["apps/**"],
+      "automerge": false,
+      "pinDigests": true
+    }
+  ],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "managerFilePatterns": ["/^apps/.*\\.nix$/"],
+      "matchStrings": [
+        "repo\\s*=\\s*\"https://github.com/(?<depName>[^\"]+?)(?:\\.git)?\";\\s*\\n\\s*rev\\s*=\\s*\"(?<currentDigest>[0-9a-f]{40})\""
+      ],
+      "datasourceTemplate": "git-refs",
+      "depNameTemplate": "https://github.com/{{{depName}}}",
+      "currentValueTemplate": "main"
+    },
+    {
+      "customType": "regex",
+      "description": "Docker image apps: bump image tag and pin a digest.",
+      "managerFilePatterns": ["/^apps/.*\\.nix$/"],
+      "matchStrings": [
+        "image\\s*=\\s*\"(?<depName>[^\"]+?)\";\\s*\\n\\s*tag\\s*=\\s*\"(?<currentValue>[^\"@]+?)\"(?:;\\s*\\n\\s*digest\\s*=\\s*\"(?<currentDigest>sha256:[0-9a-f]+)\")?"
+      ],
+      "datasourceTemplate": "docker"
+    }
+  ]
+}

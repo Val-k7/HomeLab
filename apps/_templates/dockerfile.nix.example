@@ -1,0 +1,6 @@
+{
+  runner = "dockerfile";
+  repo = "https://github.com/you/your-app";
+  rev = "0000000000000000000000000000000000000000";
+  port = 8080;
+}

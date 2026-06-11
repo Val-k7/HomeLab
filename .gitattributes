@@ -1,0 +1,11 @@
+# Shell scripts run on NixOS/Linux; GNU bash does not tolerate CRLF in the
+# shebang or `set -euo pipefail` lines, so force LF regardless of the checkout
+# platform (this repo is edited from Windows too).
+*.sh        text eol=lf
+bin/hl-*    text eol=lf
+# Go is gofmt-checked in CI (LF). Force LF so a Windows checkout does not show
+# the whole file as modified / trip the gofmt gate locally.
+*.go        text eol=lf
+# Eval-only test host (CI flake-checks the enabled observability path). Keep it
+# out of `git archive` so the public release mirror does not ship test scaffolding.
+hosts/obstest/ export-ignore
