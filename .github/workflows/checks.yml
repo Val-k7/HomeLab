@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   go:
-    runs-on: ${{ vars.CI_SELF_HOSTED == 'true' && fromJSON('["self-hosted","kvm"]') || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
@@ -44,7 +44,7 @@ jobs:
         run: go build ./cmd/validate-platform
 
   secrets-scan:
-    runs-on: ${{ vars.CI_SELF_HOSTED == 'true' && fromJSON('["self-hosted","kvm"]') || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
         with:
@@ -66,7 +66,7 @@ jobs:
   # python linting of run: blocks are disabled (bin/*.sh has its own shellcheck
   # job; run-block linting is noisy), keeping this focused on workflow validity.
   actionlint:
-    runs-on: ${{ vars.CI_SELF_HOSTED == 'true' && fromJSON('["self-hosted","kvm"]') || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
       - name: actionlint
@@ -75,7 +75,7 @@ jobs:
           ./actionlint -color -shellcheck= -pyflakes=
 
   web:
-    runs-on: ${{ vars.CI_SELF_HOSTED == 'true' && fromJSON('["self-hosted","kvm"]') || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
@@ -89,26 +89,18 @@ jobs:
         run: npm run build
 
   shellcheck:
-    runs-on: ${{ vars.CI_SELF_HOSTED == 'true' && fromJSON('["self-hosted","kvm"]') || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
       - name: shellcheck
         run: |
-          # Portable across GitHub-hosted (shellcheck preinstalled) and
-          # self-hosted NixOS runners (no apt; provide it via nix).
-          if command -v shellcheck >/dev/null 2>&1; then
-            shellcheck --severity=warning bin/*.sh
-          elif command -v nix >/dev/null 2>&1; then
-            nix run nixpkgs#shellcheck -- --severity=warning bin/*.sh
-          else
-            sudo apt-get update -qq && sudo apt-get install -y shellcheck
-            shellcheck --severity=warning bin/*.sh
-          fi
+          sudo apt-get update -qq && sudo apt-get install -y shellcheck
+          shellcheck --severity=warning bin/*.sh
 
   # Enumerate every hosts/<name>/ so the platform job validates the whole fleet,
   # not just homelab. Output is a JSON array consumed by the matrix below.
   discover:
-    runs-on: ${{ vars.CI_SELF_HOSTED == 'true' && fromJSON('["self-hosted","kvm"]') || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     outputs:
       hosts: ${{ steps.h.outputs.hosts }}
     steps:
@@ -128,7 +120,7 @@ jobs:
   # Kept out of the platform job's `nix flake check --no-build` because it
   # needs an actual VM build + KVM; release.yml also gates tag releases on it.
   restore-e2e:
-    runs-on: ${{ vars.CI_SELF_HOSTED == 'true' && fromJSON('["self-hosted","kvm"]') || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
       - uses: cachix/install-nix-action@ba0dd844c9180cbf77aa72a116d6fbc515d0e87b # v27
@@ -141,7 +133,7 @@ jobs:
 
   platform:
     needs: discover
-    runs-on: ${{ vars.CI_SELF_HOSTED == 'true' && fromJSON('["self-hosted","kvm"]') || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
