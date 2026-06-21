@@ -23,7 +23,7 @@ jobs:
   # narrows the run to a single host.
   fleet:
     needs: changes
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.CI_SELF_HOSTED == 'true' && fromJSON('["self-hosted","kvm"]') || 'ubuntu-latest' }}
     outputs:
       matrix: ${{ steps.m.outputs.matrix }}
       count: ${{ steps.m.outputs.count }}
@@ -50,7 +50,7 @@ jobs:
           echo "fleet matrix: $fleet"
 
   changes:
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.CI_SELF_HOSTED == 'true' && fromJSON('["self-hosted","kvm"]') || 'ubuntu-latest' }}
     outputs:
       deploy: ${{ steps.f.outputs.deploy }}
       infra: ${{ steps.f.outputs.infra }}
@@ -101,7 +101,7 @@ jobs:
   check:
     needs: changes
     if: needs.changes.outputs.infra == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.CI_SELF_HOSTED == 'true' && fromJSON('["self-hosted","kvm"]') || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
       - uses: cachix/install-nix-action@ba0dd844c9180cbf77aa72a116d6fbc515d0e87b # v27
@@ -117,7 +117,7 @@ jobs:
   deploy:
     needs: [fleet, changes, check]
     if: ${{ !cancelled() && needs.changes.outputs.deploy == 'true' && needs.fleet.outputs.count != '0' && (needs.check.result == 'success' || needs.check.result == 'skipped') }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.CI_SELF_HOSTED == 'true' && fromJSON('["self-hosted","kvm"]') || 'ubuntu-latest' }}
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.fleet.outputs.matrix) }}

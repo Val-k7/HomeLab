@@ -17,7 +17,7 @@ jobs:
   # backup -> restore NixOS VM test passes (tests/restore-e2e.nix). Same job
   # shape as the restore-e2e job in checks.yml.
   restore-e2e:
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.CI_SELF_HOSTED == 'true' && fromJSON('["self-hosted","kvm"]') || 'ubuntu-latest' }}
     permissions:
       contents: read
     steps:
@@ -32,7 +32,7 @@ jobs:
 
   release:
     needs: restore-e2e
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.CI_SELF_HOSTED == 'true' && fromJSON('["self-hosted","kvm"]') || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
       - name: Create release from changelog
